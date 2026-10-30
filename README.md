@@ -49,3 +49,11 @@ chmod +x shadowsocks.sh
 ```
 
 会写回配置、重启服务，并更新 `/root/shadowsocks-users.txt`（如果有）。旧链接立刻不能用。
+
+## 看某个端口的链接
+
+本仓库没有 Airlink。看普通 `ss://`：
+
+```bash
+./shadowsocks.sh show 23859
+```
