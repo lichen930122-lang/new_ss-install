@@ -862,7 +862,7 @@ pre_install() {
 
   if [[ "$SS_PROFILE" == multi ]]; then
     echo "5) 每端口同时在线限制"
-    echo -e "  ${green}1${plain}) 同时只允许 1 个公网 IP；断开后约 2 秒放坑，下一台密码对了就能连（无报名口）"
+    echo -e "  ${green}1${plain}) 同时只允许 1 个公网 IP；断开即放坑，下一台密码对了就能连（无报名口）"
     echo -e "  ${green}2${plain}) 不限制（同一密码可多人同时连）"
     ask "输入数字，回车默认 1: " pick
     pick="${pick:-1}"
@@ -892,7 +892,7 @@ pre_install() {
     echo "  方式   多用户 ${SS_USER_COUNT} 人"
     echo "  端口   ${ss_port}-${SS_PORT_END}（一人一端口，密码随机）"
     if [[ "$SS_IP_LIMIT" -eq 1 ]]; then
-      echo "  限制   每端口 1 个公网 IP；断开约 2 秒后下一台可连"
+      echo "  限制   每端口 1 个公网 IP；断开即放坑，下一台可连"
     else
       echo "  限制   不限制同时在线人数"
     fi
@@ -963,7 +963,7 @@ write_ip_limit_script() {
   mkdir -p "$(dirname "$LIMIT_BIN")" "$LIMIT_STATE_DIR"
   cat > "$LIMIT_BIN" <<'EOF'
 #!/usr/bin/env python3
-"""独享：每口 1 个公网 IP，断开后约 2 秒放坑，密码对即可连。"""
+"""独享：每口 1 个公网 IP，断开即放坑，密码对即可连。"""
 from __future__ import annotations
 
 import hashlib
@@ -982,7 +982,6 @@ PORTS_FILE = Path("/etc/shadowsocks/ip-limit.ports")
 LOG_FILE = Path("/var/log/shadowsocks-ip-limit.log")
 TOKEN_FILE = Path("/var/lib/shadowsocks/ip-limit/tokens.json")
 CHAIN = "SS_IP_LIMIT"
-IDLE_RELEASE = 2
 HMAC_WINDOW = 180
 TOKEN_GRACE = 90
 NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -1099,7 +1098,7 @@ def endpoint_host(ep: str) -> str:
 def peer_ips(port: int) -> set[str]:
     suffix = f":{port}"
     ips: set[str] = set()
-    for args in (["ss", "-tn"], ["ss", "-un"]):
+    for args in (["ss", "-tnH", "state", "established"], ["ss", "-unH"]):
         result = run(args)
         for line in result.stdout.splitlines():
             parts = line.split()
@@ -1174,7 +1173,7 @@ def ensure_chain(ports: list[int]) -> None:
         run(["iptables", "-A", CHAIN, "-p", "udp", "--dport", port_s, "-m", "set", "--match-set", name, "src", "-j", "RETURN"])
         run(["iptables", "-A", CHAIN, "-p", "tcp", "--dport", port_s, "-j", "REJECT", "--reject-with", "tcp-reset"])
         run(["iptables", "-A", CHAIN, "-p", "udp", "--dport", port_s, "-j", "DROP"])
-        log(f"已为端口 {port} 写入防火墙（无令牌时先连先占；有令牌则认设备）")
+        log(f"已为端口 {port} 写入防火墙（先连先占，断开即放）")
 
 
 def drop_extra_conntrack(port: int, owner: str) -> None:
@@ -1193,6 +1192,7 @@ def shutil_which(name: str) -> bool:
 
 
 last_seen: dict[int, float] = {}
+had_session: set[int] = set()
 rules_signature = ""
 
 
@@ -1326,16 +1326,21 @@ def enforce_once() -> None:
         online = peer_ips(port)
         if members:
             cur = members[0]
-            if cur in online or online:
-                last_seen[port] = now
             drop_extra_conntrack(port, cur)
-            if cur not in online and now - last_seen.get(port, 0) >= IDLE_RELEASE:
+            if cur in online:
+                last_seen[port] = now
+                had_session.add(port)
+            elif port in had_session or now - last_seen.get(port, now) >= 1:
                 ipset_flush(port)
                 last_seen.pop(port, None)
+                had_session.discard(port)
                 log(f"端口 {port} 原 IP {cur} 已离线，释放名额")
+            else:
+                last_seen.setdefault(port, now)
         elif online:
             first = sorted(online)[0]
             bind_ip(port, first)
+            had_session.add(port)
             log(f"端口 {port} 锁定 {first}（普通客户端）")
 
 
@@ -1353,13 +1358,13 @@ def serve_tokens() -> None:
 
 
 def main() -> None:
-    log("单 IP 限制已启动（断开约 2 秒放坑，无报名口）")
+    log("单 IP 限制已启动（断开即放坑，无报名口）")
     while True:
         try:
             enforce_once()
         except Exception as exc:
             log(f"循环异常: {exc}")
-        time.sleep(1)
+        time.sleep(0.2)
 
 
 if __name__ == "__main__":
@@ -1507,7 +1512,7 @@ EOF
     nohup "$py" "$LIMIT_BIN" >>/var/log/shadowsocks-ip-limit.log 2>&1 &
     echo $! >/var/run/shadowsocks-ip-limit.pid
   fi
-  info "已开启独享：每口 1 个公网 IP，断开约 2 秒后下一台密码对了就能连。不用开 443。"
+  info "已开启独享：每口 1 个公网 IP，断开即放坑，下一台密码对了就能连。不用开 443。"
 }
 
 cmd_limit_on() {
@@ -1566,7 +1571,7 @@ save_users_file() {
     echo "加密      ${ss_cipher}"
     echo "模式      ${ss_mode}"
     if [[ "$SS_IP_LIMIT" -eq 1 ]]; then
-      echo "独享      每口 1 个公网 IP，断开约 2 秒放坑（无报名口）"
+      echo "独享      每口 1 个公网 IP，断开即放坑（无报名口）"
     fi
     echo
     for i in "${!SS_PORTS[@]}"; do
@@ -1614,7 +1619,7 @@ print_result() {
     save_users_file
     echo "账号表已保存: ${USERS_FILE}（仅 root 可读）"
     if [[ "$SS_IP_LIMIT" -eq 1 ]]; then
-      echo "已限制：每个端口同时 1 个公网 IP。断开后约 2 秒放坑，下一台密码对了就能连。"
+      echo "已限制：每个端口同时 1 个公网 IP。断开即放坑，下一台密码对了就能连。"
       echo "同一 Wi-Fi/公司 NAT 下多台设备仍算同一个 IP，可以一起用。"
       echo "普通 Shadowsocks 直接用下面的链接，不用报名口、不用指纹。"
       echo "请在云厂商安全组放行 TCP/UDP ${ss_port}-${SS_PORT_END}"
