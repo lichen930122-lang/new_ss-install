@@ -20,4 +20,32 @@ chmod +x shadowsocks.sh
 ./shadowsocks.sh limit-on
 ```
 
-不改密码。不要对旧仓库那批「认设备」机器跑这个脚本。
+不要对旧仓库那批「认设备」机器跑这个脚本。
+
+## 改密码（不用重装）
+
+单端口，随机新密码：
+
+```bash
+./shadowsocks.sh set-pass
+```
+
+多端口，只改其中一个（随机新密码）：
+
+```bash
+./shadowsocks.sh set-pass 23859
+```
+
+自己指定新密码（单端口、多端口都行）：
+
+```bash
+./shadowsocks.sh set-pass 23859 '你的新密码'
+```
+
+单端口也可以直接：
+
+```bash
+./shadowsocks.sh set-pass '你的新密码'
+```
+
+会写回配置、重启服务，并更新 `/root/shadowsocks-users.txt`（如果有）。旧链接立刻不能用。
