@@ -862,7 +862,7 @@ pre_install() {
 
   if [[ "$SS_PROFILE" == multi ]]; then
     echo "5) 每端口同时在线限制"
-    echo -e "  ${green}1${plain}) 同时只允许 1 个公网 IP；断开即放坑，下一台密码对了就能连（无报名口）"
+    echo -e "  ${green}1${plain}) 同时只允许 1 个公网 IP；换 WiFi 后约 1 秒就能用新公网 IP 连（无报名口）"
     echo -e "  ${green}2${plain}) 不限制（同一密码可多人同时连）"
     ask "输入数字，回车默认 1: " pick
     pick="${pick:-1}"
@@ -877,7 +877,7 @@ pre_install() {
     echo
     if [[ "$SS_IP_LIMIT" -eq 1 ]]; then
       echo "---------------------------"
-      echo "独享 = 先连先占，断开即让位（不要用旧仓库的 443/令牌）"
+      echo "独享 = 先连先占；换 WiFi/换公网 IP 后旧连接没流量即让位（不要用旧仓库的 443/令牌）"
       echo "---------------------------"
       echo
     fi
@@ -892,7 +892,7 @@ pre_install() {
     echo "  方式   多用户 ${SS_USER_COUNT} 人"
     echo "  端口   ${ss_port}-${SS_PORT_END}（一人一端口，密码随机）"
     if [[ "$SS_IP_LIMIT" -eq 1 ]]; then
-      echo "  限制   每端口 1 个公网 IP；断开即放坑，下一台可连"
+      echo "  限制   每端口 1 个公网 IP；换网后约 1 秒可用新 IP"
     else
       echo "  限制   不限制同时在线人数"
     fi
@@ -963,7 +963,7 @@ write_ip_limit_script() {
   mkdir -p "$(dirname "$LIMIT_BIN")" "$LIMIT_STATE_DIR"
   cat > "$LIMIT_BIN" <<'EOF'
 #!/usr/bin/env python3
-"""独享：每口 1 个公网 IP，断开即放坑，密码对即可连。"""
+"""独享：每口 1 个公网 IP。换网络后旧 IP 没流量即放坑，新 IP 密码对即可连。"""
 from __future__ import annotations
 
 import hashlib
@@ -982,6 +982,7 @@ PORTS_FILE = Path("/etc/shadowsocks/ip-limit.ports")
 LOG_FILE = Path("/var/log/shadowsocks-ip-limit.log")
 TOKEN_FILE = Path("/var/lib/shadowsocks/ip-limit/tokens.json")
 CHAIN = "SS_IP_LIMIT"
+STALE_MS = 1000
 HMAC_WINDOW = 180
 TOKEN_GRACE = 90
 NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
@@ -1096,18 +1097,39 @@ def endpoint_host(ep: str) -> str:
 
 
 def peer_ips(port: int) -> set[str]:
+    """还在发包的对端。ESTABLISHED 但超过 STALE_MS 没收到包（换 WiFi 僵尸连接）不算占坑。"""
     suffix = f":{port}"
+    skip = {"127.0.0.1", "::1", "0.0.0.0", "*", "State"}
     ips: set[str] = set()
-    for args in (["ss", "-tnH", "state", "established"], ["ss", "-unH"]):
-        result = run(args)
-        for line in result.stdout.splitlines():
+    queries = (
+        (["ss", "-tnHi", "state", "established"], ["ss", "-tnH", "state", "established"]),
+        (["ss", "-unHi"], ["ss", "-unH"]),
+    )
+    for primary, fallback in queries:
+        result = run(primary)
+        if result.returncode != 0:
+            result = run(fallback)
+        lines = result.stdout.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if not line or line[0] in " \t":
+                i += 1
+                continue
             parts = line.split()
+            host = None
             for idx, token in enumerate(parts[:-1]):
                 if token.endswith(suffix):
                     host = endpoint_host(parts[idx + 1])
-                    if host and host not in {"127.0.0.1", "::1", "0.0.0.0", "*", "State"}:
-                        ips.add(host)
                     break
+            lastrcv = None
+            if i + 1 < len(lines) and lines[i + 1][:1] in " \t":
+                m = re.search(r"lastrcv:(\d+)", lines[i + 1])
+                if m:
+                    lastrcv = int(m.group(1))
+            if host and host not in skip and (lastrcv is None or lastrcv < STALE_MS):
+                ips.add(host)
+            i += 1
     return ips
 
 
@@ -1145,6 +1167,18 @@ def ipset_flush(port: int) -> None:
     run(["ipset", "flush", set_name(port, True)])
 
 
+def forget_slot(port: int, ip: str = "") -> None:
+    ipset_flush(port)
+    if not shutil_which("conntrack"):
+        return
+    if ip:
+        run(["conntrack", "-D", "-p", "tcp", "--dport", str(port), "-s", ip])
+        run(["conntrack", "-D", "-p", "udp", "--dport", str(port), "-s", ip])
+    else:
+        run(["conntrack", "-D", "-p", "tcp", "--dport", str(port)])
+        run(["conntrack", "-D", "-p", "udp", "--dport", str(port)])
+
+
 def is_ipv6(ip: str) -> bool:
     return ":" in ip and "." not in ip
 
@@ -1173,7 +1207,7 @@ def ensure_chain(ports: list[int]) -> None:
         run(["iptables", "-A", CHAIN, "-p", "udp", "--dport", port_s, "-m", "set", "--match-set", name, "src", "-j", "RETURN"])
         run(["iptables", "-A", CHAIN, "-p", "tcp", "--dport", port_s, "-j", "REJECT", "--reject-with", "tcp-reset"])
         run(["iptables", "-A", CHAIN, "-p", "udp", "--dport", port_s, "-j", "DROP"])
-        log(f"已为端口 {port} 写入防火墙（先连先占，断开即放）")
+        log(f"已为端口 {port} 写入防火墙（先连先占，换网后旧 IP 没流量即放）")
 
 
 def drop_extra_conntrack(port: int, owner: str) -> None:
@@ -1331,7 +1365,7 @@ def enforce_once() -> None:
                 last_seen[port] = now
                 had_session.add(port)
             elif port in had_session or now - last_seen.get(port, now) >= 1:
-                ipset_flush(port)
+                forget_slot(port, cur)
                 last_seen.pop(port, None)
                 had_session.discard(port)
                 log(f"端口 {port} 原 IP {cur} 已离线，释放名额")
@@ -1358,7 +1392,7 @@ def serve_tokens() -> None:
 
 
 def main() -> None:
-    log("单 IP 限制已启动（断开即放坑，无报名口）")
+    log("单 IP 限制已启动（换网后旧 IP 约 1 秒没流量即放坑，无报名口）")
     while True:
         try:
             enforce_once()
@@ -1512,7 +1546,7 @@ EOF
     nohup "$py" "$LIMIT_BIN" >>/var/log/shadowsocks-ip-limit.log 2>&1 &
     echo $! >/var/run/shadowsocks-ip-limit.pid
   fi
-  info "已开启独享：每口 1 个公网 IP，断开即放坑，下一台密码对了就能连。不用开 443。"
+  info "已开启独享：每口 1 个公网 IP。换 WiFi 后旧 IP 约 1 秒没流量即放坑，新网络密码对了就能连。不用开 443。"
 }
 
 cmd_limit_on() {
@@ -1526,7 +1560,7 @@ cmd_limit_on() {
     error "读不到端口。若还没部署成功，先运行: ./shadowsocks.sh （选多端口）。若已经在用，把上面打印的配置发回来。"
   fi
   enable_ip_limit
-  echo "已对现有端口启用独享（断开即让位），没有改密码："
+  echo "已对现有端口启用独享（换网后约 1 秒放坑），没有改密码："
   printf '  %s\n' "${SS_PORTS[@]}"
   echo "配置: ${CONF_FILE}"
   echo "云安全组：业务口 TCP/UDP 整段放行即可，不必开 443。"
@@ -1571,7 +1605,7 @@ save_users_file() {
     echo "加密      ${ss_cipher}"
     echo "模式      ${ss_mode}"
     if [[ "$SS_IP_LIMIT" -eq 1 ]]; then
-      echo "独享      每口 1 个公网 IP，断开即放坑（无报名口）"
+      echo "独享      每口 1 个公网 IP，换网后约 1 秒放坑（无报名口）"
     fi
     echo
     for i in "${!SS_PORTS[@]}"; do
@@ -1619,7 +1653,7 @@ print_result() {
     save_users_file
     echo "账号表已保存: ${USERS_FILE}（仅 root 可读）"
     if [[ "$SS_IP_LIMIT" -eq 1 ]]; then
-      echo "已限制：每个端口同时 1 个公网 IP。断开即放坑，下一台密码对了就能连。"
+      echo "已限制：每个端口同时 1 个公网 IP。换 WiFi 后旧 IP 约 1 秒没流量即放坑，新网络密码对了就能连。"
       echo "同一 Wi-Fi/公司 NAT 下多台设备仍算同一个 IP，可以一起用。"
       echo "普通 Shadowsocks 直接用下面的链接，不用报名口、不用指纹。"
       echo "请在云厂商安全组放行 TCP/UDP ${ss_port}-${SS_PORT_END}"
