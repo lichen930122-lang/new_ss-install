@@ -28,7 +28,19 @@ chmod +x shadowsocks.sh
 ./shadowsocks.sh limit-on
 ```
 
-不改密码。不要对旧仓库那批「认设备」机器跑这个脚本。
+不改密码。
+
+## 2b. 以前用 ss-install 装的独享，要换成「切网约 1 秒能连」
+
+**不要**再跑安装向导。端口和密码都保留。下载**本仓库**脚本，只执行 `limit-on`：
+
+```bash
+wget -O shadowsocks.sh https://raw.githubusercontent.com/lichen930122-lang/new_ss-install/main/shadowsocks.sh
+chmod +x shadowsocks.sh
+./shadowsocks.sh limit-on
+```
+
+会换掉旧的 443/令牌独享逻辑，Shadowsocks 本身不用重装。之后普通 `ss://` 即可；Airlink / 报名口不再使用。安全组可以关掉 TCP 443（业务口 TCP+UDP 仍要开）。
 
 ## 3. 关掉独享
 
@@ -73,7 +85,7 @@ cat /root/shadowsocks-users.txt
 | 机器状态 | 命令 |
 |---|---|
 | 新机器 | `wget` + `chmod` + `./shadowsocks.sh 2>&1 \| tee shadowsocks.log` |
-| 补独享 | `./shadowsocks.sh limit-on` |
+| 补独享 / 从旧 ss-install 独享切过来 | `wget` 本仓库脚本后 `./shadowsocks.sh limit-on`（不重装、不改密码） |
 | 关独享 | `./shadowsocks.sh limit-off` |
 | 改某一口密码 | `./shadowsocks.sh set-pass` / `set-pass 23859` / `set-pass 23859 '新密码'` |
 | 看账号 | `./shadowsocks.sh show 23865` ；多个口空格分开；不写端口=全部 |
